@@ -1,0 +1,346 @@
+//Note: GLCM_SIZE will be modified
+//via text editor
+#define GLCM_SIZE 65536
+#define GLCM_AXIS 256
+
+__kernel void TextureAnalysis_u8(__global unsigned char *Grayscale,
+				 int KernelSizeX,
+				 int KernelSizeY, 
+				 int NumberOfOffsets,
+				 __global int *XOffset,
+				 __global int *YOffset,
+				 __global float *Contrast,
+				 __global float *Energy,
+				 __global float *Correlation,
+				 __global float *Homogeneity,
+				 __global float *Entropy,
+				 __global float *MaxProb,
+				 __global float *ClusterShade,
+				 __global float *ClusterProm){
+
+	int Counter = 0;
+	int Total = 0;
+
+	int GLCMLength = GLCM_SIZE;
+
+	float GLCMIndexI[GLCM_SIZE];
+	float GLCMIndexJ[GLCM_SIZE];
+	float GLCMValue[GLCM_SIZE];
+
+	float GLCMMeanI = 0;
+	float GLCMMeanJ = 0;
+	float GLCMStdDevI = 0;
+	float GLCMStdDevJ = 0;
+
+	for (int q = 0; q < GLCMLength; q++){
+		GLCMIndexI[q] = 0;
+		GLCMIndexJ[q] = 0;
+		GLCMValue[q] = 0;
+	}
+
+	//The largest pixel distance isn't necs. the kernel size.
+	//For example, a 3x3 pixel could have a pixel offset of 5
+	int LargestXPixelDistance = 0;
+	int LargestYPixelDistance = 0;
+
+	for (int l = 0; l < NumberOfOffsets; l++){
+		if (LargestXPixelDistance  < abs(XOffset[l])){
+			LargestXPixelDistance = abs(XOffset[l]);
+		}
+
+		if (LargestYPixelDistance  < abs(YOffset[l])){
+			LargestYPixelDistance = abs(YOffset[l]);
+		}
+	}
+
+	int lc = get_global_id(2) + get_global_size(2)*get_global_id(1);
+
+	if(get_global_id(2) <= KernelSizeX || get_global_id(2) >= get_global_size(2) - KernelSizeX ||
+	   get_global_id(1) <= KernelSizeY || get_global_id(1) >= get_global_size(1) - KernelSizeY){
+		//Out of Bounds
+		Contrast[lc] = 0;
+		Energy[lc] = 0;
+		Homogeneity[lc] = 0;
+		Entropy[lc] = 0;
+		Correlation[lc] = 0;
+		MaxProb[lc] = 0;
+		ClusterShade[lc] = 0;
+		ClusterProm[lc] = 0;
+		return;
+	}
+
+	for (int y = get_global_id(1) - KernelSizeY; y < get_global_id(1) + KernelSizeY; y++){
+		for (int x = get_global_id(2) - KernelSizeX; x < get_global_id(2) + KernelSizeX; x++){
+			//adjusted for the different in Grayscale vs. Contrast/Energy/etc. size
+			int index = x + get_global_size(2)*y;
+			unsigned char N = Grayscale[index];
+
+			for (int l = 0; l < NumberOfOffsets; l++){
+				//this handles looping through the pixel offsets
+				int XO = XOffset[l];
+				int YO = YOffset[l];
+
+				int index1 = (x + XO) + get_global_size(2)*(y + YO);
+				unsigned char N1 = Grayscale[index1];
+
+				int PairExists = 0;
+
+				//Check if the I,J pair already exists
+				for (int q = 0; q < Counter; q++){
+					if ((GLCMIndexI[q] == N && GLCMIndexJ[q] == N1) ||
+						(GLCMIndexI[q] == N1 && GLCMIndexJ[q] == N)){
+						GLCMValue[q] += 1;
+						PairExists = 1;
+					}
+				}
+
+				//The Pair Doesn't Exist
+				if (PairExists == 0){
+					GLCMIndexI[Counter] = N;
+					GLCMIndexJ[Counter] = N1;
+
+					//GLCMIndexI[Counter + 1] = N1;
+					//GLCMIndexJ[Counter + 1] = N;
+
+					GLCMValue[Counter] += 1;
+					//GLCMValue[Counter + 1] += 1;
+					Counter += 1;
+				}
+			}
+		}
+	}
+
+	for (int l = 0; l < Counter; l++){
+		Total += GLCMValue[l];
+	}
+
+	//Compute the probability first
+	for (int l = 0; l < Counter; l++){
+		GLCMValue[l] = (GLCMValue[l] / Total);
+	}
+
+	//Compute the Mean for I and J
+	for (int l = 0; l < Counter; l++){
+		int I = GLCMIndexI[l];
+		GLCMMeanI += GLCMValue[l] * I;
+
+		int J = GLCMIndexJ[l];
+		GLCMMeanJ += GLCMValue[l] * J;
+	}
+
+	for (int l = 0; l < Counter; l++){
+		GLCMStdDevI += pow(GLCMValue[l] - GLCMMeanI, 2);
+		GLCMStdDevJ += pow(GLCMValue[l] - GLCMMeanJ, 2);
+	}
+
+	GLCMStdDevI = sqrt(GLCMStdDevI);
+	GLCMStdDevJ = sqrt(GLCMStdDevJ);
+
+	float lContrast = 0;
+	float lEnergy = 0;
+	float lHomogeneity = 0;
+	float lEntropy = 0;
+	float lCorrelation = 0;
+	float lMaxProb = 0;
+	float lIDM = 0;
+	float lClusterShade = 0;
+	float lClusterProm = 0;
+	float lVar = 0;
+	float p = 0;
+
+	for (int l = 0; l < Counter; l++){
+		int N_I = GLCMIndexI[l];
+		int N_J = GLCMIndexJ[l];
+
+		p = GLCMValue[l];
+		float iMinusj = fabs((float)N_I - (float)N_J);
+
+		lContrast += p*iMinusj*iMinusj;
+		lEnergy += p*p;
+		lHomogeneity += p / (1 + iMinusj*iMinusj);
+
+		if (GLCMStdDevI*GLCMStdDevJ != 0){
+			lCorrelation += (N_I*N_J*p - (GLCMMeanI*GLCMMeanJ)) / (GLCMStdDevI*GLCMStdDevJ);
+		}
+
+		lEntropy += p*log(p);
+		lClusterShade += pow(N_I + N_J - GLCMMeanJ - GLCMMeanI, 3)*p;
+		lClusterProm += pow(N_I + N_J - GLCMMeanJ - GLCMMeanI, 4)*p;
+
+		if (p > lMaxProb){
+			lMaxProb += p;
+		}
+	}
+
+	Contrast[lc] = lContrast;
+	Energy[lc] = lEnergy;
+	Homogeneity[lc] = lHomogeneity;
+	Entropy[lc] = -lEntropy;
+	Correlation[lc] = lCorrelation;
+	MaxProb[lc] = lMaxProb;
+	ClusterShade[lc] = lClusterShade;
+	ClusterProm[lc] = lClusterProm;
+}
+
+__kernel void TextureAnalysis_u8_subset(__global unsigned char *Grayscale,
+				 int KernelSizeX,
+				 int KernelSizeY, 
+				 int NumberOfOffsets,
+				 __global int *XOffset,
+				 __global int *YOffset,
+				 __global float *Contrast,
+				 __global float *Energy,
+				 __global float *Correlation,
+				 __global float *Homogeneity,
+				 __global float *Entropy,
+				 __global float *MaxProb,
+				 __global float *ClusterShade,
+				 __global float *ClusterProm){
+
+	int Counter = 0;
+	int Total = 0;
+
+	int GLCMLength = GLCM_SIZE;
+
+	float GLCMIndexI[GLCM_SIZE];
+	float GLCMIndexJ[GLCM_SIZE];
+	float GLCMValue[GLCM_SIZE];
+
+	float GLCMMeanI = 0;
+	float GLCMMeanJ = 0;
+	float GLCMStdDevI = 0;
+	float GLCMStdDevJ = 0;
+
+	for (int q = 0; q < GLCMLength; q++){
+		GLCMIndexI[q] = 0;
+		GLCMIndexJ[q] = 0;
+		GLCMValue[q] = 0;
+	}
+
+	//The largest pixel distance isn't necs. the kernel size.
+	//For example, a 3x3 pixel could have a pixel offset of 5
+	int LargestXPixelDistance = 0;
+	int LargestYPixelDistance = 0;
+
+	for (int l = 0; l < NumberOfOffsets; l++){
+		if (LargestXPixelDistance  < abs(XOffset[l])){
+			LargestXPixelDistance = abs(XOffset[l]);
+		}
+
+		if (LargestYPixelDistance  < abs(YOffset[l])){
+			LargestYPixelDistance = abs(YOffset[l]);
+		}
+	}
+
+	for (int y = LargestYPixelDistance; y < KernelSizeY - LargestYPixelDistance; y++){
+		for (int x = LargestXPixelDistance; x < KernelSizeX - LargestXPixelDistance; x++){
+			//adjusted for the different in Grayscale vs. Contrast/Energy/etc. size
+			int index = x + KernelSizeX*y;
+			unsigned char N = Grayscale[index];
+
+			for (int l = 0; l < NumberOfOffsets; l++){
+				//this handles looping through the pixel offsets
+				int XO = XOffset[l];
+				int YO = YOffset[l];
+
+				int index1 = (x + XO) + KernelSizeX*(y + YO);
+				unsigned char N1 = Grayscale[index1];
+
+				int PairExists = 0;
+
+				//Check if the I,J pair already exists
+				for (int q = 0; q < Counter; q++){
+					if ((GLCMIndexI[q] == N && GLCMIndexJ[q] == N1) ||
+						(GLCMIndexI[q] == N1 && GLCMIndexJ[q] == N)){
+						GLCMValue[q] += 1;
+						PairExists = 1;
+					}
+				}
+
+				//The Pair Doesn't Exist
+				if (PairExists == 0){
+					GLCMIndexI[Counter] = N;
+					GLCMIndexJ[Counter] = N1;
+
+					//GLCMIndexI[Counter + 1] = N1;
+					//GLCMIndexJ[Counter + 1] = N;
+
+					GLCMValue[Counter] += 1;
+					//GLCMValue[Counter + 1] += 1;
+					Counter += 1;
+				}
+			}
+		}
+	}
+
+	for (int l = 0; l < Counter; l++){
+		Total += GLCMValue[l];
+	}
+
+	//Compute the probability first
+	for (int l = 0; l < Counter; l++){
+		GLCMValue[l] = (GLCMValue[l] / Total);
+	}
+
+	//Compute the Mean for I and J
+	for (int l = 0; l < Counter; l++){
+		int I = GLCMIndexI[l];
+		GLCMMeanI += GLCMValue[l] * I;
+
+		int J = GLCMIndexJ[l];
+		GLCMMeanJ += GLCMValue[l] * J;
+	}
+
+	for (int l = 0; l < Counter; l++){
+		GLCMStdDevI += pow(GLCMValue[l] - GLCMMeanI, 2);
+		GLCMStdDevJ += pow(GLCMValue[l] - GLCMMeanJ, 2);
+	}
+
+	GLCMStdDevI = sqrt(GLCMStdDevI);
+	GLCMStdDevJ = sqrt(GLCMStdDevJ);
+
+	float lContrast = 0;
+	float lEnergy = 0;
+	float lHomogeneity = 0;
+	float lEntropy = 0;
+	float lCorrelation = 0;
+	float lMaxProb = 0;
+	float lIDM = 0;
+	float lClusterShade = 0;
+	float lClusterProm = 0;
+	float lVar = 0;
+	float p = 0;
+
+	for (int l = 0; l < Counter; l++){
+		int N_I = GLCMIndexI[l];
+		int N_J = GLCMIndexJ[l];
+
+		p = GLCMValue[l];
+		float iMinusj = fabs((float)N_I - (float)N_J);
+
+		lContrast += p*iMinusj*iMinusj;
+		lEnergy += p*p;
+		lHomogeneity += p / (1 + iMinusj*iMinusj);
+
+		if (GLCMStdDevI*GLCMStdDevJ != 0){
+			lCorrelation += (N_I*N_J*p - (GLCMMeanI*GLCMMeanJ)) / (GLCMStdDevI*GLCMStdDevJ);
+		}
+
+		lEntropy += p*log(p);
+		lClusterShade += pow(N_I + N_J - GLCMMeanJ - GLCMMeanI, 3)*p;
+		lClusterProm += pow(N_I + N_J - GLCMMeanJ - GLCMMeanI, 4)*p;
+
+		if (p > lMaxProb){
+			lMaxProb += p;
+		}
+	}
+
+	Contrast[0] = lContrast;
+	Energy[0] = lEnergy;
+	Homogeneity[0] = lHomogeneity;
+	Entropy[0] = -lEntropy;
+	Correlation[0] = lCorrelation;
+	MaxProb[0] = lMaxProb;
+	ClusterShade[0] = lClusterShade;
+	ClusterProm[0] = lClusterProm;
+}

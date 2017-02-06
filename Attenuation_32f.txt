@@ -1,0 +1,37 @@
+__kernel void Attenuation_32f(__global float *Input_dB,
+			      int ImageHeight,
+				__global float *Output){
+
+//Taken from: "Depth-resolved model-based reconstruction of att. coeff. in
+//               optical coherence tomography"  by Vermeer and de Boer
+
+	float buffer[2048];
+
+	int z = get_global_id(0);
+	int y = get_global_id(1);
+	int x = get_global_id(2);
+
+	float delta = 1;
+
+	//Buffer the global into local memory
+	for(int i = 0; i < ImageHeight; i++){
+		//Get the starting row and fetch all points in that A-Scan to memory, which is the x dimension
+		//which is why x=>i
+		int linear_coord = i + ImageHeight*x + get_global_size(2)*ImageHeight*z;
+
+		//Convert from dB back into linear scale
+		buffer[i] = Input_dB[linear_coord];
+		buffer[i] = buffer[i] / 20;
+		buffer[i] = pow(10, buffer[i]);		
+	}
+
+	float runningSum = 0;
+
+	for(int i = ImageHeight - 2; i > 0; i--){
+		int linear_coord = i + ImageHeight*x + get_global_size(2)*ImageHeight*z;
+		runningSum = runningSum + buffer[i + 1];
+        float AttenCoeff = buffer[i] / (2*delta*runningSum);
+        Output[linear_coord] = AttenCoeff;
+		//Output[linear_coord] = i;		
+	}
+}
